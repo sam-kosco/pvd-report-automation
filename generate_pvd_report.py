@@ -32,10 +32,10 @@ CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 DRIVE_ID = "b!_bzXaIx86kOufgJN3ih-BaDIDthKYuxJkJtLi1Bm5irGjCEnK-VHSpBRRm3_SDKU"
 
 # Path to the PVD Excel file (relative to drive root)
-EXCEL_PATH = "/Shared Documents/Report Automation/PVD AA Cabin/PVD Tables.xlsx"
+EXCEL_PATH = "/Report Automation/PVD AA Cabin/PVD Tables.xlsx"
 
 # SharePoint folder path where PDFs will be saved
-PDF_OUTPUT_FOLDER = "/Shared Documents/Report Automation/PVD AA Cabin/Daily Reports"
+PDF_OUTPUT_FOLDER = "/Report Automation/PVD AA Cabin/Daily Reports"
 
 # ─── EMAIL CONFIG ─────────────────────────────────────────────────────────────
 # Set to False to skip sending the email (useful when testing)
