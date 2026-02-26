@@ -39,7 +39,7 @@ PDF_OUTPUT_FOLDER = "/Report Automation/PVD AA Cabin/Daily Reports"
 
 # ─── EMAIL CONFIG ─────────────────────────────────────────────────────────────
 # Set to False to skip sending the email (useful when testing)
-SEND_EMAIL = False
+SEND_EMAIL = True
 
 EMAIL_FROM = "foxtrot.automation@foxtrotaviation.com"
 
