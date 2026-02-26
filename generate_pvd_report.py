@@ -38,6 +38,9 @@ EXCEL_PATH = "/Shared Documents/Report Automation/PVD AA Cabin/PVD Tables.xlsx"
 PDF_OUTPUT_FOLDER = "/Shared Documents/Report Automation/PVD AA Cabin/Daily Reports"
 
 # ─── EMAIL CONFIG ─────────────────────────────────────────────────────────────
+# Set to False to skip sending the email (useful when testing)
+SEND_EMAIL = False
+
 EMAIL_FROM = "foxtrot.automation@foxtrotaviation.com"
 
 EMAIL_RECIPIENTS = [
@@ -384,27 +387,30 @@ def main():
     upload_pdf(token, abridged_filename, abridged_bytes)
 
     # 7. Send email with both PDFs attached
-    subject = f"PVD Recap: {date_short}"
-    body = (
-        f"Hello team,\n\n"
-        f"View the attached abridged and full reports for PVD on {date_short}. "
-        f"Please reach out to Maren with any questions about the reported "
-        f"operations, and reach out to Sam with questions about the report "
-        f"creation or formatting.\n\n"
-        f"Thanks,\n"
-        f"Foxtrot Automation Services"
-    )
-    send_email(
-        token=token,
-        subject=subject,
-        body=body,
-        recipients=EMAIL_RECIPIENTS,
-        from_address=EMAIL_FROM,
-        attachments=[
-            (abridged_filename, abridged_bytes),
-            (full_filename,     full_bytes),
-        ],
-    )
+    if SEND_EMAIL:
+        subject = f"PVD Recap: {date_short}"
+        body = (
+            f"Hello team,\n\n"
+            f"View the attached abridged and full reports for PVD on {date_short}. "
+            f"Please reach out to Maren with any questions about the reported "
+            f"operations, and reach out to Sam with questions about the report "
+            f"creation or formatting.\n\n"
+            f"Thanks,\n"
+            f"Foxtrot Automation Services"
+        )
+        send_email(
+            token=token,
+            subject=subject,
+            body=body,
+            recipients=EMAIL_RECIPIENTS,
+            from_address=EMAIL_FROM,
+            attachments=[
+                (abridged_filename, abridged_bytes),
+                (full_filename,     full_bytes),
+            ],
+        )
+    else:
+        print("Email sending is disabled (SEND_EMAIL = False).")
 
     print("All done!")
 
