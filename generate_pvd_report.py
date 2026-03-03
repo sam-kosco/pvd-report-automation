@@ -37,6 +37,9 @@ EXCEL_PATH = "/Report Automation/PVD AA Cabin/PVD Tables.xlsx"
 # SharePoint folder path where PDFs will be saved
 PDF_OUTPUT_FOLDER = "/Report Automation/PVD AA Cabin/Daily Reports"
 
+# SharePoint path to the screenshot embedded in the email body
+SCREENSHOT_PATH = "/Flow Dumps/AA Screenshots/PVD.png"
+
 # ─── EMAIL CONFIG ─────────────────────────────────────────────────────────────
 # Set to False to skip sending the email (useful when testing)
 SEND_EMAIL = True
@@ -83,6 +86,16 @@ def download_excel(token):
     return io.BytesIO(resp.content)
 
 
+def download_screenshot(token):
+    """Download the station screenshot PNG from SharePoint."""
+    url = (f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
+           f"/root:{SCREENSHOT_PATH}:/content")
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+    resp.raise_for_status()
+    print("Screenshot downloaded from SharePoint.")
+    return resp.content
+
+
 def upload_pdf(token, filename, pdf_bytes):
     """Upload a PDF to the SharePoint PVD output folder."""
     upload_path = f"{PDF_OUTPUT_FOLDER}/{filename}"
@@ -103,12 +116,28 @@ def upload_pdf(token, filename, pdf_bytes):
 
 # ─── EMAIL SENDING ────────────────────────────────────────────────────────────
 
-def send_email(token, subject, body, recipients, from_address, attachments):
+def send_email(token, subject, body_text, recipients, from_address,
+               attachments, screenshot_bytes=None):
     """
-    Send email via Microsoft Graph API with PDF attachments.
-    attachments: list of (filename, bytes) tuples
+    Send HTML email via Microsoft Graph API with PDF attachments.
+    If screenshot_bytes is provided it is embedded inline in the email body
+    below the message text, using a cid: reference.
+    attachments: list of (filename, bytes) tuples (PDFs)
     """
     attachment_list = []
+
+    # Inline screenshot — referenced in HTML body via cid:stationScreenshot
+    if screenshot_bytes:
+        attachment_list.append({
+            "@odata.type":  "#microsoft.graph.fileAttachment",
+            "name":         "screenshot.png",
+            "contentType":  "image/png",
+            "contentBytes": base64.b64encode(screenshot_bytes).decode("utf-8"),
+            "contentId":    "stationScreenshot",
+            "isInline":     True,
+        })
+
+    # PDF file attachments (appear as regular attachments)
     for filename, pdf_bytes in attachments:
         attachment_list.append({
             "@odata.type":  "#microsoft.graph.fileAttachment",
@@ -117,9 +146,25 @@ def send_email(token, subject, body, recipients, from_address, attachments):
             "contentBytes": base64.b64encode(pdf_bytes).decode("utf-8"),
         })
 
+    # Build HTML body: each non-empty line becomes a paragraph, image appended below
+    html_paragraphs = "".join(
+        f'<p style="margin:0 0 10px 0;">{line}</p>'
+        for line in body_text.split("\n") if line.strip()
+    )
+    img_tag = (
+        '<p><img src="cid:stationScreenshot" '
+        'style="max-width:600px;width:100%;border:1px solid #ccc;" '
+        'alt="Station Screenshot" /></p>'
+    ) if screenshot_bytes else ""
+    html_body = (
+        '<html><body style="font-family:Calibri,Arial,sans-serif;font-size:14px;">'
+        f"{html_paragraphs}{img_tag}"
+        "</body></html>"
+    )
+
     message = {
         "subject": subject,
-        "body":    {"contentType": "Text", "content": body},
+        "body":    {"contentType": "HTML", "content": html_body},
         "toRecipients": [
             {"emailAddress": {"address": addr}} for addr in recipients
         ],
@@ -129,10 +174,7 @@ def send_email(token, subject, body, recipients, from_address, attachments):
     url = f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail"
     resp = requests.post(
         url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type":  "application/json",
-        },
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json={"message": message, "saveToSentItems": True},
     )
     resp.raise_for_status()
@@ -250,7 +292,6 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
         textColor=colors.HexColor('#555555'), spaceAfter=4,
     )
 
-    # ── Column widths per section ──────────────────────────────────────────────
     flag_widths = [0.5*inch, 0.7*inch, 0.7*inch, 0.6*inch,
                    1.2*inch, 0.5*inch, 3.3*inch]
     mp_widths   = [1.8*inch, 0.8*inch, 1.5*inch, 1.2*inch, 1.2*inch]
@@ -291,18 +332,17 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
                           col_widths=col_widths, include_table=show_table)
         ))
 
-    # ── Section order mirrors PVD Email Generation rows 2–15 ──────────────────
-    add(sections[2])                                              # 1. PTO
-    add(lms_section)                                             # 2. LMS
-    add(sections[4])                                             # 3. Safety101
-    add(sections[5])                                             # 4. AA Learning Hub
-    add(sections[6])                                             # 5. SV1 Delays
-    add(sections[7])                                             # 6. Skipped Jobs
-    add(sections[8],  col_widths=flag_widths, is_flags=True)    # 7. Flags (always shown)
-    add(sections[9])                                             # 8. Security Tests
-    add(sections[14], col_widths=mp_widths)                     # 9. Missing Punches
-    add(sections[15], col_widths=eb_widths)                     # 10. Employee Breaks
-    add(sections[12], ws_source=ws_jobs, col_widths=qr_widths)  # 11. QR Codes (Sheet1)
+    add(sections[2])
+    add(lms_section)
+    add(sections[4])
+    add(sections[5])
+    add(sections[6])
+    add(sections[7])
+    add(sections[8],  col_widths=flag_widths, is_flags=True)
+    add(sections[9])
+    add(sections[14], col_widths=mp_widths)
+    add(sections[15], col_widths=eb_widths)
+    add(sections[12], ws_source=ws_jobs, col_widths=qr_widths)
 
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -364,7 +404,6 @@ def main():
             'col_end':   g,
         }
 
-    # LMS: use whichever of row 3 or row 13 has fewer data rows
     lms_section = (
         sections[13] if sections[13]['count'] < sections[3]['count']
         else sections[3]
@@ -386,7 +425,11 @@ def main():
     upload_pdf(token, full_filename,     full_bytes)
     upload_pdf(token, abridged_filename, abridged_bytes)
 
-    # 7. Send email with both PDFs attached
+    # 7. Download screenshot for email body
+    print("Downloading station screenshot...")
+    screenshot_bytes = download_screenshot(token)
+
+    # 8. Send email with both PDFs attached
     if SEND_EMAIL:
         subject = f"PVD Recap: {date_short}"
         body = (
@@ -401,13 +444,14 @@ def main():
         send_email(
             token=token,
             subject=subject,
-            body=body,
+            body_text=body,
             recipients=EMAIL_RECIPIENTS,
             from_address=EMAIL_FROM,
             attachments=[
                 (abridged_filename, abridged_bytes),
                 (full_filename,     full_bytes),
             ],
+            screenshot_bytes=screenshot_bytes,
         )
     else:
         print("Email sending is disabled (SEND_EMAIL = False).")
