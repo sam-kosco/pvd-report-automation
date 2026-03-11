@@ -51,7 +51,7 @@ EMAIL_RECIPIENTS = [
     "joya.gregory@foxtrotaviation.com",
     "ricardo.garcia@foxtrotaviation.com",
     "levorn.smallwood@foxtrotaviation.com",
-    "kristopher.scheuerman@foxtrotaviation.com",
+    "lori.desjardin@foxtrotaviation.com",
     "maren.pinpin@foxtrotaviation.com",
     "daniel.digiambattista@foxtrotaviation.com",
     "anthony.pentz@foxtrotaviation.com",
