@@ -296,6 +296,7 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
                    1.2*inch, 0.5*inch, 3.3*inch]
     mp_widths   = [1.8*inch, 0.8*inch, 1.5*inch, 1.2*inch, 1.2*inch]
     eb_widths   = [1.8*inch, 0.8*inch, 1.7*inch, 1.5*inch]
+    audit_widths = [1.2*inch, 1.5*inch, 1.5*inch, 3.3*inch]
     qr_widths   = [0.8*inch, 0.75*inch, 0.75*inch, 0.7*inch,
                    0.7*inch, 0.7*inch, 1.4*inch, 0.5*inch, 0.7*inch]
 
@@ -342,6 +343,7 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
     add(sections[9])
     add(sections[14], col_widths=mp_widths)
     add(sections[15], col_widths=eb_widths)
+    add(sections[16], col_widths=audit_widths)
     add(sections[12], ws_source=ws_jobs, col_widths=qr_widths)
 
     doc = SimpleDocTemplate(
@@ -388,7 +390,7 @@ def main():
 
     # 4. Read section metadata (rows 2–15 of Email Generation)
     sections = {}
-    for sheet_row in range(2, 16):
+    for sheet_row in range(2, 17):
         row_data = list(ws_email.iter_rows(
             min_row=sheet_row, max_row=sheet_row,
             min_col=1, max_col=7, values_only=True,
