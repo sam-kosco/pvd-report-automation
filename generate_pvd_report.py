@@ -8,10 +8,12 @@ Sends email via Microsoft Graph API.
 import os
 import io
 import sys
+import csv
 import json
 import base64
 import requests
 import openpyxl
+from pathlib import Path
 from datetime import datetime, date, time
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -23,9 +25,13 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
 # ─── MICROSOFT GRAPH AUTH CONFIG (set via GitHub Actions secrets) ─────────────
-TENANT_ID     = os.environ["TENANT_ID"]
-CLIENT_ID     = os.environ["CLIENT_ID"]
-CLIENT_SECRET = os.environ["CLIENT_SECRET"]
+TENANT_ID     = os.environ.get("TENANT_ID")
+CLIENT_ID     = os.environ.get("CLIENT_ID")
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+
+# Dry-run mode: point at the OneDrive-synced Data Hub folder to read every
+# input locally, write the PDFs to ./out, and skip upload + email entirely.
+LOCAL_DATA_HUB = os.environ.get("LOCAL_DATA_HUB")
 
 # ─── SHAREPOINT CONFIG ────────────────────────────────────────────────────────
 # Drive ID for foxtrotaviationcom.sharepoint.com/sites/DataHub
@@ -78,12 +84,20 @@ def get_access_token():
 
 def download_excel(token):
     """Download the PVD Excel file from SharePoint into a BytesIO buffer."""
-    url = (f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
-           f"/root:{EXCEL_PATH}:/content")
+    data = download_source(token, EXCEL_PATH)
+    print("PVD Excel file loaded.")
+    return io.BytesIO(data)
+
+
+def download_source(token, path):
+    """Download a Data Hub file by drive-relative path (or read the synced
+    local copy when LOCAL_DATA_HUB is set)."""
+    if LOCAL_DATA_HUB:
+        return (Path(LOCAL_DATA_HUB) / path.lstrip("/")).read_bytes()
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:{path}:/content"
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
     resp.raise_for_status()
-    print("PVD Excel file downloaded from SharePoint.")
-    return io.BytesIO(resp.content)
+    return resp.content
 
 
 def download_screenshot(token):
@@ -201,6 +215,125 @@ def fmt_date_short(val):
     return str(val)
 
 
+def fmt_pct(x):
+    """Match Excel's ROUND(...,2) display: 87.5 not 87.50, 84.25 stays 84.25."""
+    return f"{round(x, 2):.2f}".rstrip("0").rstrip(".")
+
+
+# ─── DIRECT-SOURCE SECTIONS (replaces the workbook's Power Query layer) ───────
+# The LMS / Safety101 tables inside PVD Tables.xlsx are Power Query connections
+# whose cached values only refresh when a human opens the file in desktop
+# Excel — the pivots hadn't refreshed since June and the old queries filtered
+# on "PVD AA CABIN", a value that doesn't exist in the source CSVs ("PVD AA
+# CAB"), which is where the company-wide LMS numbers and the #DIV/0! in the
+# emailed PDF came from. Everything in this block reads the underlying source
+# files directly with the correct filters. Tables Power Automate writes into
+# the workbook (PTO, delays, skips, flags, tests, punches, breaks, audits,
+# jobs) are still read from the workbook — that data lives nowhere else.
+
+LMS_TRANSCRIPT_PATH = "/Flow Dumps/dashboard-transcript/learner_transcript.csv"
+S101_EXPIRING_PATH  = ("/Safety101/S101 Compliance/"
+                       "Foxtrot Aviation Services Entire Organization"
+                       " Expiring Training.csv")
+S101_DATA_PATH      = "/Safety101/S101 Compliance/Safety101 Data.csv"
+
+LMS_LOCATIONS  = {"PVD AA CAB"}  # learner_transcript Location
+S101_LOCATIONS = {"PVD AA CAB"}  # Safety101 Data Location
+
+
+def s101_department_match(dept):
+    return dept == "PVD AA CAB"
+
+
+def read_csv_dicts(raw):
+    return list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))))
+
+
+def build_lms_sections(lms_rows):
+    """LMS by-employee and by-title sections from learner_transcript.csv.
+    Sentence mirrors the workbook's B3 formula exactly."""
+    rows = [r for r in lms_rows if r["Location"] in LMS_LOCATIONS]
+    status    = [r["Status"] for r in rows]
+    overdue   = status.count("Overdue")
+    due_soon  = status.count("Not Started") + status.count("In Progress")
+    completed = status.count("Completed")
+    total     = sum(1 for r in rows if r["Employee"])
+    compliance = fmt_pct(100 * completed / total) if total else "0"
+    text = (f"There are currently {overdue} Overdue Courses on the LMS, and "
+            f"{due_soon} Courses Due Soon ({compliance}% Compliance)")
+
+    def grouped(field, header):
+        counts = {}
+        for r in rows:
+            if r["Status"] == "Overdue":
+                key = r[field].strip()
+                counts[key] = counts.get(key, 0) + 1
+        data = [[header, "Overdue"]]
+        data += [[k, str(v)] for k, v in
+                 sorted(counts.items(), key=lambda kv: kv[0].lower())]
+        if counts:
+            data.append(["Grand Total", str(sum(counts.values()))])
+        return {'text': text, 'count': len(counts),
+                'data': data if counts else []}
+
+    return grouped("Employee", "Employee"), grouped("Course Title", "Title")
+
+
+def build_s101_section(expiring_rows, s101_rows):
+    """Safety101 section from the platform's Expiring Training report plus the
+    internal compliance calc. Sentence mirrors the workbook's B4 formula."""
+    exp = [r for r in expiring_rows if s101_department_match(r["Department"])]
+    first_words   = [r["Expiration Status"].split(" ")[0] for r in exp]
+    expiring_soon = first_words.count("Expires")
+    noncompliant  = len(first_words) - expiring_soon
+    comp_vals = [float(r["Comp?"]) for r in s101_rows
+                 if r["Location"] in S101_LOCATIONS and r["Comp?"] not in (None, "")]
+    compliance = fmt_pct(100 * sum(comp_vals) / len(comp_vals)) if comp_vals else "0"
+    text = (f"There are currently {noncompliant} Noncompliant Qualifications on "
+            f"Safety101, and {expiring_soon} Qualifications Expiring Soon "
+            f"({compliance}% Compliance)")
+
+    counts = {}
+    for r in exp:
+        key = r["Employee"].strip()
+        counts[key] = counts.get(key, 0) + 1
+    data = [["Employee", "Noncompliant Courses"]]
+    data += [[k, str(v)] for k, v in
+             sorted(counts.items(), key=lambda kv: kv[0].lower())]
+    if counts:
+        data.append(["Grand Total", str(sum(counts.values()))])
+    return {'text': text, 'count': len(counts), 'data': data if counts else []}
+
+
+def build_tests_section(wb, start_date, end_date):
+    """Security-tests section read straight from the Tests sheet. The Email
+    Generation FILTER formulas for this section broke to #REF! long ago, so
+    the emailed report always claimed there were no tests. Sentence mirrors
+    the workbook's B9 formula."""
+    ws = wb["Tests"]
+    it = ws.iter_rows(values_only=True)
+    next(it)  # header: Date | Shift | Tester | Test Object | Employee | Outcome | Notes
+    rows, fails = [], 0
+    for r in it:
+        d = r[0]
+        if not isinstance(d, datetime):
+            continue
+        if start_date and end_date and start_date <= d <= end_date:
+            rows.append([fmt_value(d), fmt_value(r[2]), fmt_value(r[4]),
+                         fmt_value(r[5]), fmt_value(r[6])])
+            if str(r[5]).strip() == "Fail":
+                fails += 1
+    n = len(rows)
+    if n == 0:
+        text = "There were no security tests in date range"
+    else:
+        text = (f"Of the {n} security tests conducted in date range, "
+                f"{fails} were failed")
+    data = ([["Date", "Tester", "Employee", "Outcome", "Notes"]] + rows
+            if rows else [])
+    return {'text': text, 'count': n, 'data': data}
+
+
 # ─── TABLE HELPERS ────────────────────────────────────────────────────────────
 
 def get_table_data(ws, row_start, row_end, col_start, col_end):
@@ -309,13 +442,20 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
             Paragraph(str(meta['text']  or ""), style_body),
         ]
         if include_table:
-            has_table = not (rs == re_ and count == 0)
-            if has_table and all(v is not None for v in [rs, re_, cs, ce]):
-                src  = ws_source or ws_email
-                data = get_table_data(src, rs, re_, cs, ce)
-                tbl  = make_table(data, col_widths=col_widths)
+            if 'data' in meta:
+                # Section computed directly from source files, not the workbook
+                tbl = make_table([list(r) for r in meta['data']],
+                                 col_widths=col_widths) if meta['data'] else None
                 if tbl:
                     elems.append(tbl)
+            else:
+                has_table = not (rs == re_ and count == 0)
+                if has_table and all(v is not None for v in [rs, re_, cs, ce]):
+                    src  = ws_source or ws_email
+                    data = get_table_data(src, rs, re_, cs, ce)
+                    tbl  = make_table(data, col_widths=col_widths)
+                    if tbl:
+                        elems.append(tbl)
         elems.append(Spacer(1, 4))
         return elems
 
@@ -359,8 +499,16 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
 
 def main():
     # 1. Authenticate
-    print("Authenticating with Microsoft Graph...")
-    token = get_access_token()
+    if LOCAL_DATA_HUB:
+        token = None
+        print(f"LOCAL_DATA_HUB set — reading {LOCAL_DATA_HUB}; "
+              f"dry run (no upload, no email).")
+    else:
+        for var in ("TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"):
+            if not os.environ.get(var):
+                sys.exit(f"Missing env var {var} (or set LOCAL_DATA_HUB)")
+        print("Authenticating with Microsoft Graph...")
+        token = get_access_token()
 
     # 2. Download PVD Excel from SharePoint
     excel_bytes = download_excel(token)
@@ -406,6 +554,25 @@ def main():
             'col_end':   g,
         }
 
+    # 4b. Replace the Power-Query-backed sections with direct source reads
+    print("Reading source files directly (LMS / Safety101)...")
+    lms_rows = read_csv_dicts(download_source(token, LMS_TRANSCRIPT_PATH))
+    sec_lms_emp, sec_lms_title = build_lms_sections(lms_rows)
+    sections[3].update(sec_lms_emp)
+    sections[13].update(sec_lms_title)
+
+    exp_rows  = read_csv_dicts(download_source(token, S101_EXPIRING_PATH))
+    s101_rows = read_csv_dicts(download_source(token, S101_DATA_PATH))
+    sections[4].update(build_s101_section(exp_rows, s101_rows))
+
+    # AA Learning Hub: no PVD source exists — keep the workbook's static text,
+    # suppress the (broken #REF!) table range.
+    sections[5]['data'] = []
+
+    # Security tests: the Email Generation FILTER for this section is #REF!;
+    # read the Tests sheet directly instead.
+    sections[9].update(build_tests_section(wb, start_date_raw, end_date_raw))
+
     lms_section = (
         sections[13] if sections[13]['count'] < sections[3]['count']
         else sections[3]
@@ -422,6 +589,15 @@ def main():
     print("Generating abridged report PDF...")
     abridged_bytes = build_pdf_bytes(
         ws_email, ws_jobs, date_line, sections, lms_section, abridged=True)
+
+    # Dry run: write the PDFs locally and stop before any side effects
+    if LOCAL_DATA_HUB:
+        out = Path("out")
+        out.mkdir(exist_ok=True)
+        (out / full_filename).write_bytes(full_bytes)
+        (out / abridged_filename).write_bytes(abridged_bytes)
+        print(f"Dry run complete — PDFs written to {out.resolve()}")
+        return
 
     # 6. Upload PDFs to SharePoint
     upload_pdf(token, full_filename,     full_bytes)
