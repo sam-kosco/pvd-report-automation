@@ -23,6 +23,9 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from zoneinfo import ZoneInfo
+
+from aa_jobs import DEBRIEFS_PATH, job_details_section
 
 # ─── MICROSOFT GRAPH AUTH CONFIG (set via GitHub Actions secrets) ─────────────
 TENANT_ID     = os.environ.get("TENANT_ID")
@@ -96,6 +99,18 @@ def download_source(token, path):
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
     resp.raise_for_status()
     return resp.content
+
+
+def source_last_modified(token, path):
+    """Return the file's last-modified datetime (local mtime in dry-run mode)."""
+    if LOCAL_DATA_HUB:
+        mtime = (Path(LOCAL_DATA_HUB) / path.lstrip("/")).stat().st_mtime
+        return datetime.fromtimestamp(mtime)
+    url = f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}/root:{path}"
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+    resp.raise_for_status()
+    stamp = resp.json()["lastModifiedDateTime"]
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
 def download_screenshot(token):
@@ -349,7 +364,8 @@ def get_table_data(ws, row_start, row_end, col_start, col_end):
 
 def make_table(data, col_widths=None,
                header_bg=colors.HexColor('#2F5496'),
-               stripe_color=colors.HexColor('#DCE6F1')):
+               stripe_color=colors.HexColor('#DCE6F1'),
+               highlight_rows=()):
     if not data:
         return None
     while data and all(v == "" for v in data[-1]):
@@ -371,12 +387,20 @@ def make_table(data, col_widths=None,
         textColor=colors.black, alignment=TA_LEFT, leading=10,
     )
 
+    # Rows flagged by the caller (e.g. incorrectly scanned jobs) print red.
+    miscan_style = ParagraphStyle(
+        'TableCellFlagged', parent=cell_style,
+        textColor=colors.HexColor('#9C0006'),
+    )
+    highlight_rows = set(highlight_rows)
+
     wrapped = []
     for r_idx, row in enumerate(data):
         new_row = []
         for cell in row:
             if isinstance(cell, str):
-                s = header_style if r_idx == 0 else cell_style
+                s = (header_style if r_idx == 0 else
+                     miscan_style if r_idx in highlight_rows else cell_style)
                 new_row.append(Paragraph(cell, s))
             else:
                 new_row.append(cell)
@@ -396,6 +420,9 @@ def make_table(data, col_widths=None,
     for i in range(1, len(wrapped)):
         if i % 2 == 0:
             style_cmds.append(('BACKGROUND', (0, i), (-1, i), stripe_color))
+    for i in highlight_rows:
+        style_cmds.append(('BACKGROUND', (0, i), (-1, i),
+                           colors.HexColor('#F8D7DA')))
     t.setStyle(TableStyle(style_cmds))
     return t
 
@@ -443,6 +470,7 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
             if 'data' in meta:
                 # Section computed directly from source files, not the workbook
                 tbl = make_table([list(r) for r in meta['data']],
+                                 highlight_rows=meta.get('highlight', ()),
                                  col_widths=col_widths) if meta['data'] else None
                 if tbl:
                     elems.append(tbl)
@@ -512,7 +540,7 @@ def main():
     excel_bytes = download_excel(token)
     wb       = openpyxl.load_workbook(excel_bytes, data_only=True)
     ws_email = wb['Email Generation']
-    ws_jobs  = wb['Sheet1']          # PVD uses Sheet1 as the Jobs Email source
+    ws_jobs  = wb['Sheet1'] if 'Sheet1' in wb.sheetnames else None  # retired: Job Details now come from AA Debriefs.csv
 
     # 3. Read submission ID and dates
     submission_id = str(ws_email['B1'].value or "report")
@@ -570,6 +598,16 @@ def main():
     # Security tests: the Email Generation FILTER for this section is #REF!;
     # read the Tests sheet directly instead.
     sections[9].update(build_tests_section(wb, start_date_raw, end_date_raw))
+
+    # Job Details (report item 11): read from AA Debriefs.csv, which
+    # aa-cabin-automation publishes hourly from cabin.aa.com, instead of the
+    # workbook's Job_Details table fed by the JotForm CSV upload.
+    if start_date_raw and end_date_raw:
+        as_of = source_last_modified(token, DEBRIEFS_PATH).astimezone(
+            ZoneInfo("America/New_York")).strftime("%m/%d %I:%M %p ET")
+        sections[12] = job_details_section(
+            sections[12]['title'], download_source(token, DEBRIEFS_PATH),
+            "PVD", start_date_raw, end_date_raw, as_of=as_of)
 
     lms_section = (
         sections[13] if sections[13]['count'] < sections[3]['count']
