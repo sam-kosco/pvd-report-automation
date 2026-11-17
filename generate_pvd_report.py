@@ -54,8 +54,6 @@ EMAIL_FROM = "foxtrot.automation@foxtrotaviation.com"
 
 EMAIL_RECIPIENTS = [
     "jamie.mathers@foxtrotaviation.com",
-    "joya.gregory@foxtrotaviation.com",
-    "ricardo.garcia@foxtrotaviation.com",
     "levorn.smallwood@foxtrotaviation.com",
     "lori.desjardin@foxtrotaviation.com",
     "maren.pinpin@foxtrotaviation.com",
