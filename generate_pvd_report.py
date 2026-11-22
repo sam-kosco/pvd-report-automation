@@ -6,6 +6,7 @@ Sends email via Microsoft Graph API.
 """
 
 import os
+import re
 import io
 import sys
 import csv
@@ -25,7 +26,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from zoneinfo import ZoneInfo
 
-from aa_jobs import DEBRIEFS_PATH, job_details_section
+from aa_jobs import DEBRIEFS_PATH, job_details_section, physical_forms_section
 
 # ─── MICROSOFT GRAPH AUTH CONFIG (set via GitHub Actions secrets) ─────────────
 TENANT_ID     = os.environ.get("TENANT_ID")
@@ -455,6 +456,7 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
     mp_widths   = [1.8*inch, 0.8*inch, 1.5*inch, 1.2*inch, 1.2*inch]
     eb_widths   = [1.8*inch, 0.8*inch, 1.7*inch, 1.5*inch]
     audit_widths = [1.2*inch, 1.5*inch, 1.5*inch, 3.3*inch]
+    forms_widths = [0.8*inch, 0.6*inch, 0.75*inch, 0.75*inch, 2.5*inch, 2.1*inch]
     qr_widths   = [0.8*inch, 0.75*inch, 0.75*inch, 0.7*inch,
                    0.7*inch, 0.7*inch, 1.4*inch, 0.5*inch, 0.7*inch]
 
@@ -510,6 +512,8 @@ def build_pdf_bytes(ws_email, ws_jobs, date_line, sections, lms_section,
     add(sections[14], col_widths=mp_widths)
     add(sections[15], col_widths=eb_widths)
     add(sections[16], col_widths=audit_widths)
+    if 17 in sections:
+        add(sections[17], col_widths=forms_widths)
     add(sections[12], ws_source=ws_jobs, col_widths=qr_widths)
 
     doc = SimpleDocTemplate(
@@ -599,8 +603,16 @@ def main():
     # read the Tests sheet directly instead.
     sections[9].update(build_tests_section(wb, start_date_raw, end_date_raw))
 
-    # Job Details (report item 11): read from AA Debriefs.csv, which
-    # aa-cabin-automation publishes hourly from cabin.aa.com, instead of the
+    # Item numbers (Sam, 2026-11-22): the workbook numbered both Station Audits and
+    # Job Details "11.". Station Audits = 11, the new physical security search
+    # forms item = 12, Job Details = 13.
+    def renumber(title, n):
+        return re.sub(r"^\s*\d+\.\s*", f"{n}. ", str(title or ""))
+    sections[16]['title'] = renumber(sections[16]['title'], 11)
+    sections[12]['title'] = renumber(sections[12]['title'], 13)
+
+    # Job Details (item 13) and physical forms (item 12): read from AA Debriefs.csv,
+    # which aa-cabin-automation publishes hourly from cabin.aa.com, instead of the
     # workbook's Job_Details table fed by the JotForm CSV upload.
     if start_date_raw and end_date_raw:
         as_of = source_last_modified(token, DEBRIEFS_PATH).astimezone(
@@ -608,6 +620,10 @@ def main():
         sections[12] = job_details_section(
             sections[12]['title'], download_source(token, DEBRIEFS_PATH),
             "PVD", start_date_raw, end_date_raw, as_of=as_of)
+        sections[17] = physical_forms_section(
+            "12. Physical Security Search Forms Required:",
+            download_source(token, DEBRIEFS_PATH),
+            "PVD", start_date_raw, end_date_raw)
 
     lms_section = (
         sections[13] if sections[13]['count'] < sections[3]['count']
