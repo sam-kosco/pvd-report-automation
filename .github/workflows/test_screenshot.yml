@@ -1,0 +1,34 @@
+name: Test dashboard screenshot fetch
+
+# Diagnostic only: exercises download_screenshot() against the live JotForm
+# form with the repo's JOTFORM_KEY secret. Sends no email, writes nothing to
+# SharePoint. Fails when no fresh station PNG is found, so a green run means
+# the real report will embed an image.
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install openpyxl reportlab requests
+
+      - name: Fetch the dashboard screenshot
+        env:
+          JOTFORM_KEY: ${{ secrets.JOTFORM_KEY }}
+        run: |
+          python -c "
+          from generate_pvd_report import download_screenshot
+          b = download_screenshot()
+          if b:
+              print(f'SUCCESS: fetched {len(b)} byte PNG')
+          else:
+              raise SystemExit('NO IMAGE returned - see the messages above')
+          "
