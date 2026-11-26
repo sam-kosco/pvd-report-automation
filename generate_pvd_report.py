@@ -15,7 +15,7 @@ import base64
 import requests
 import openpyxl
 from pathlib import Path
-from datetime import datetime, date, time
+from datetime import date, datetime, time, timedelta, timezone
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -47,8 +47,19 @@ EXCEL_PATH = "/Report Automation/PVD AA Cabin/PVD Tables.xlsx"
 # SharePoint folder path where PDFs will be saved
 PDF_OUTPUT_FOLDER = "/Report Automation/PVD AA Cabin/Daily Reports"
 
-# SharePoint path to the screenshot embedded in the email body
-SCREENSHOT_PATH = "/Flow Dumps/AA Screenshots/PVD.png"
+# --- Dashboard screenshot: JotForm form 252504858606058, upload field 29 ---
+# Maren uploads the station dashboard screenshot through this form. The PA
+# flow that used to copy it to /Flow Dumps/AA Screenshots/<station>.png was
+# deleted by accident (2026-11), so the report reads the form directly. The
+# repository_dispatch carries no submission id, so the newest submission for
+# THIS station wins; the station field is found by its ANSWER VALUE, never a
+# hardcoded qid. A stale dashboard is worse than none: nothing fresh within
+# MAX_SCREENSHOT_AGE_DAYS means the email simply goes out without the image.
+JOTFORM_KEY = os.environ.get("JOTFORM_KEY", "")
+JF_FORM_ID = "252504858606058"
+JF_UPLOAD_QID = "29"
+JF_STATION = "PVD"
+MAX_SCREENSHOT_AGE_DAYS = 3
 
 # ─── EMAIL CONFIG ─────────────────────────────────────────────────────────────
 # Set to False to skip sending the email (useful when testing)
@@ -114,14 +125,63 @@ def source_last_modified(token, path):
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
-def download_screenshot(token):
-    """Download the station screenshot PNG from SharePoint."""
-    url = (f"https://graph.microsoft.com/v1.0/drives/{DRIVE_ID}"
-           f"/root:{SCREENSHOT_PATH}:/content")
-    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
-    resp.raise_for_status()
-    print("Screenshot downloaded from SharePoint.")
-    return resp.content
+def download_screenshot():
+    """The station dashboard screenshot from the newest matching JotForm
+    submission. Returns PNG bytes, or None when the key is missing, nothing
+    fresh matches, or any step fails — the email then omits the image rather
+    than embedding a stale one (the old SharePoint copy stopped updating the
+    day the PA flow was deleted, which is exactly the failure this avoids)."""
+    if not JOTFORM_KEY:
+        print("JOTFORM_KEY not set - sending without the dashboard image.")
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.jotform.com/form/{JF_FORM_ID}/submissions",
+            params={"apiKey": JOTFORM_KEY, "limit": "100"}, timeout=30)
+        resp.raise_for_status()
+        subs = resp.json().get("content") or []
+        subs.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_SCREENSHOT_AGE_DAYS)
+        for sub in subs:
+            created = sub.get("created_at") or ""
+            try:  # JotForm stamps are naive US/Eastern-ish strings; compare loosely
+                created_dt = datetime.fromisoformat(created).replace(tzinfo=timezone.utc)
+            except ValueError:
+                created_dt = None
+            if created_dt and created_dt < cutoff:
+                break  # newest-first: everything after this is older still
+            answers = sub.get("answers") or {}
+            station = ""
+            for qid, a in answers.items():
+                if qid == JF_UPLOAD_QID:
+                    continue
+                v = a.get("answer")
+                if isinstance(v, str) and v.strip().upper() in ("STL", "PVD"):
+                    station = v.strip().upper()
+                    break
+            if station != JF_STATION:
+                continue
+            upload = (answers.get(JF_UPLOAD_QID) or {}).get("answer")
+            if isinstance(upload, list):
+                upload = upload[0] if upload else None
+            if not isinstance(upload, str) or not upload.strip():
+                continue
+            file_url = upload.strip()
+            fresp = requests.get(file_url, params={"apiKey": JOTFORM_KEY}, timeout=30)
+            fresp.raise_for_status()
+            if not fresp.content or not fresp.content.startswith(b"\x89PNG"):
+                print(f"Submission {sub.get('id')} field {JF_UPLOAD_QID} is not "
+                      f"a PNG ({len(fresp.content)} bytes) - skipping.")
+                continue
+            print(f"Dashboard screenshot from JotForm submission "
+                  f"{sub.get('id')} ({created}, {station}).")
+            return fresp.content
+        print(f"No {JF_STATION} submission with a PNG in the last "
+              f"{MAX_SCREENSHOT_AGE_DAYS} days - sending without the image.")
+        return None
+    except Exception as e:  # noqa: BLE001 - the report must still go out
+        print(f"Dashboard screenshot fetch failed ({e!r}) - sending without it.")
+        return None
 
 
 def upload_pdf(token, filename, pdf_bytes):
@@ -657,7 +717,7 @@ def main():
 
     # 7. Download screenshot for email body
     print("Downloading station screenshot...")
-    screenshot_bytes = download_screenshot(token)
+    screenshot_bytes = download_screenshot()
 
     # 8. Send email with both PDFs attached
     if SEND_EMAIL:

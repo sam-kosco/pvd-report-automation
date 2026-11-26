@@ -29,4 +29,5 @@ jobs:
           TENANT_ID:     ${{ secrets.TENANT_ID }}
           CLIENT_ID:     ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          JOTFORM_KEY:   ${{ secrets.JOTFORM_KEY }}
         run: python generate_pvd_report.py
