@@ -782,8 +782,8 @@ def main():
     # 8. Send email with both PDFs attached
     if SEND_EMAIL:
         subject = f"PVD Recap: {date_short}"
-    if EMAIL_OVERRIDE:
-        subject = "[TEST] " + subject
+        if EMAIL_OVERRIDE:
+            subject = "[TEST] " + subject
         body = (
             f"Hello team,\n\n"
             f"View the attached abridged and full reports for PVD on {date_short}. "
