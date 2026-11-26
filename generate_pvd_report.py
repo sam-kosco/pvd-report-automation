@@ -82,6 +82,13 @@ EMAIL_RECIPIENTS = [
     "samuel.kosco@foxtrotaviation.com",
 ]
 
+# TEST MODE: EMAIL_OVERRIDE (workflow_dispatch input) reroutes the email to
+# just that address and skips the SharePoint PDF upload, so a test run
+# leaves no trace except the one [TEST]-tagged email.
+EMAIL_OVERRIDE = os.environ.get("EMAIL_OVERRIDE", "").strip()
+if EMAIL_OVERRIDE:
+    EMAIL_RECIPIENTS = [EMAIL_OVERRIDE]
+
 # ─── MICROSOFT GRAPH AUTH ─────────────────────────────────────────────────────
 
 def get_access_token():
@@ -716,8 +723,11 @@ def main():
         return
 
     # 6. Upload PDFs to SharePoint
-    upload_pdf(token, full_filename,     full_bytes)
-    upload_pdf(token, abridged_filename, abridged_bytes)
+    if EMAIL_OVERRIDE:
+        print("EMAIL_OVERRIDE set - skipping SharePoint PDF upload (test run).")
+    else:
+        upload_pdf(token, full_filename,     full_bytes)
+        upload_pdf(token, abridged_filename, abridged_bytes)
 
     # 7. Download screenshot for email body
     print("Downloading station screenshot...")
@@ -726,6 +736,8 @@ def main():
     # 8. Send email with both PDFs attached
     if SEND_EMAIL:
         subject = f"PVD Recap: {date_short}"
+    if EMAIL_OVERRIDE:
+        subject = "[TEST] " + subject
         body = (
             f"Hello team,\n\n"
             f"View the attached abridged and full reports for PVD on {date_short}. "

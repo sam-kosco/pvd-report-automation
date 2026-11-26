@@ -7,6 +7,11 @@ on:
 
   # Allow manual runs from the GitHub Actions tab (useful for testing)
   workflow_dispatch:
+    inputs:
+      email_override:
+        description: "TEST RUN: send ONLY to this address and skip the SharePoint upload"
+        required: false
+        default: ""
 
 jobs:
   generate-report:
@@ -29,5 +34,6 @@ jobs:
           TENANT_ID:     ${{ secrets.TENANT_ID }}
           CLIENT_ID:     ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          EMAIL_OVERRIDE: ${{ inputs.email_override }}
           JOTFORM_KEY:   ${{ secrets.JOTFORM_KEY }}
         run: python generate_pvd_report.py
