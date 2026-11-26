@@ -62,6 +62,7 @@ JOTFORM_KEY = os.environ.get("JOTFORM_KEY", "")
 JF_BASE = os.environ.get("JOTFORM_BASE", "https://foxtrotaviation.jotform.com/API")
 JF_FORM_ID = "252504858606058"
 JF_UPLOAD_QID = "29"
+JF_DATES_QID = "25"
 JF_STATION = "PVD"
 MAX_SCREENSHOT_AGE_DAYS = 3
 
@@ -136,14 +137,20 @@ def source_last_modified(token, path):
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
-def download_screenshot():
-    """The station dashboard screenshot from the newest matching JotForm
-    submission. Returns PNG bytes, or None when the key is missing, nothing
-    fresh matches, or any step fails — the email then omits the image rather
-    than embedding a stale one (the old SharePoint copy stopped updating the
-    day the PA flow was deleted, which is exactly the failure this avoids)."""
+_JF_SUB_CACHE = {"loaded": False, "sub": None}
+
+
+def _jf_latest_submission():
+    """The newest submission for THIS station within MAX_SCREENSHOT_AGE_DAYS,
+    or None. Fetched once per run and memoized: the dashboard screenshot
+    (field 29) and the recap date range (field 25) must come from the SAME
+    submission, or the picture could describe a different night than the
+    report claims."""
+    if _JF_SUB_CACHE["loaded"]:
+        return _JF_SUB_CACHE["sub"]
+    _JF_SUB_CACHE["loaded"] = True
     if not JOTFORM_KEY:
-        print("JOTFORM_KEY not set - sending without the dashboard image.")
+        print("JOTFORM_KEY not set - no JotForm submission available.")
         return None
     try:
         resp = requests.get(
@@ -155,7 +162,7 @@ def download_screenshot():
         cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_SCREENSHOT_AGE_DAYS)
         for sub in subs:
             created = sub.get("created_at") or ""
-            try:  # JotForm stamps are naive US/Eastern-ish strings; compare loosely
+            try:
                 created_dt = datetime.fromisoformat(created).replace(tzinfo=timezone.utc)
             except ValueError:
                 created_dt = None
@@ -170,31 +177,62 @@ def download_screenshot():
                 if isinstance(v, str) and v.strip().upper() in ("STL", "PVD"):
                     station = v.strip().upper()
                     break
-            if station != JF_STATION:
-                continue
-            upload = (answers.get(JF_UPLOAD_QID) or {}).get("answer")
-            if isinstance(upload, list):
-                upload = upload[0] if upload else None
-            if not isinstance(upload, str) or not upload.strip():
-                continue
-            file_url = upload.strip()
-            fresp = requests.get(file_url, params={"apiKey": JOTFORM_KEY}, timeout=30)
-            fresp.raise_for_status()
-            if not fresp.content or not fresp.content.startswith(b"\x89PNG"):
-                print(f"Submission {sub.get('id')} field {JF_UPLOAD_QID} is not "
-                      f"a PNG ({len(fresp.content)} bytes) - skipping.")
-                continue
-            print(f"Dashboard screenshot from JotForm submission "
-                  f"{sub.get('id')} ({created}, {station}).")
-            return fresp.content
-        print(f"No {JF_STATION} submission with a PNG in the last "
-              f"{MAX_SCREENSHOT_AGE_DAYS} days - sending without the image.")
+            if station == JF_STATION:
+                print(f"Using JotForm submission {sub.get('id')} "
+                      f"({created}, {station}).")
+                _JF_SUB_CACHE["sub"] = sub
+                return sub
+        print(f"No {JF_STATION} submission in the last "
+              f"{MAX_SCREENSHOT_AGE_DAYS} days.")
         return None
     except Exception as e:  # noqa: BLE001 - the report must still go out
-        print(f"Dashboard screenshot fetch failed ({e!r}) - sending without it.")
+        print(f"JotForm submission fetch failed ({e!r}).")
         return None
 
 
+def jf_date_range(sub):
+    """(start, end) datetimes from the submission's field 25 - the 'Dates
+    Difference' widget, whose answer reads 'Start Date: 11/25/2026 End
+    Date: 11/25/2026'. (None, None) when absent or unparseable."""
+    try:
+        raw = ((sub or {}).get("answers", {}).get(JF_DATES_QID) or {}).get("answer") or ""
+        m = re.search(r"Start Date:\s*(\d{1,2}/\d{1,2}/\d{4})\s*"
+                      r"End Date:\s*(\d{1,2}/\d{1,2}/\d{4})", str(raw))
+        if not m:
+            return None, None
+        return (datetime.strptime(m.group(1), "%m/%d/%Y"),
+                datetime.strptime(m.group(2), "%m/%d/%Y"))
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def download_screenshot():
+    """The station dashboard screenshot (field 29) of the run's JotForm
+    submission. Returns PNG bytes, or None when there is no submission, no
+    upload, or any step fails - the email then omits the image rather than
+    embedding a stale or mismatched one."""
+    sub = _jf_latest_submission()
+    if not sub:
+        print("Sending without the dashboard image.")
+        return None
+    try:
+        upload = ((sub.get("answers") or {}).get(JF_UPLOAD_QID) or {}).get("answer")
+        if isinstance(upload, list):
+            upload = upload[0] if upload else None
+        if not isinstance(upload, str) or not upload.strip():
+            print("Submission has no field-29 upload - sending without the image.")
+            return None
+        fresp = requests.get(upload.strip(), params={"apiKey": JOTFORM_KEY}, timeout=30)
+        fresp.raise_for_status()
+        if not fresp.content or not fresp.content.startswith(b"\x89PNG"):
+            print(f"Field {JF_UPLOAD_QID} is not a PNG "
+                  f"({len(fresp.content)} bytes) - sending without the image.")
+            return None
+        print(f"Dashboard screenshot: {len(fresp.content)} bytes.")
+        return fresp.content
+    except Exception as e:  # noqa: BLE001
+        print(f"Dashboard screenshot fetch failed ({e!r}) - sending without it.")
+        return None
 def upload_pdf(token, filename, pdf_bytes):
     """Upload a PDF to the SharePoint PVD output folder."""
     upload_path = f"{PDF_OUTPUT_FOLDER}/{filename}"
@@ -622,8 +660,16 @@ def main():
     if submission_id.startswith('_'):
         submission_id = submission_id[1:]
 
-    start_date_raw = ws_email.cell(row=10, column=2).value
-    end_date_raw   = ws_email.cell(row=11, column=2).value
+    # Recap date range comes from the JotForm submission's field 25 (Sam,
+    # 2026-11-25): the PA step that maintained the workbook's Start/End
+    # Date cells froze on 2026-11-13 and the submission is the source of
+    # truth anyway. The workbook cells remain only as a loud fallback.
+    start_date_raw, end_date_raw = jf_date_range(_jf_latest_submission())
+    if not start_date_raw:
+        print("WARNING: no JotForm date range - falling back to the "
+              "workbook's Start/End Date cells (stale since 2026-11-13).")
+        start_date_raw = ws_email.cell(row=10, column=2).value
+        end_date_raw   = ws_email.cell(row=11, column=2).value
     start_date_str = fmt_value(start_date_raw) if start_date_raw else ""
     end_date_str   = fmt_value(end_date_raw)   if end_date_raw   else ""
 
