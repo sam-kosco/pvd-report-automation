@@ -56,6 +56,10 @@ PDF_OUTPUT_FOLDER = "/Report Automation/PVD AA Cabin/Daily Reports"
 # hardcoded qid. A stale dashboard is worse than none: nothing fresh within
 # MAX_SCREENSHOT_AGE_DAYS means the email simply goes out without the image.
 JOTFORM_KEY = os.environ.get("JOTFORM_KEY", "")
+# Foxtrot is on JotForm ENTERPRISE: api.jotform.com answers 401 to its
+# keys — the org subdomain is the only valid host (same base the
+# platform's engine/safety.py and rampbudget.py use).
+JF_BASE = os.environ.get("JOTFORM_BASE", "https://foxtrotaviation.jotform.com/API")
 JF_FORM_ID = "252504858606058"
 JF_UPLOAD_QID = "29"
 JF_STATION = "PVD"
@@ -136,7 +140,7 @@ def download_screenshot():
         return None
     try:
         resp = requests.get(
-            f"https://api.jotform.com/form/{JF_FORM_ID}/submissions",
+            f"{JF_BASE}/form/{JF_FORM_ID}/submissions",
             params={"apiKey": JOTFORM_KEY, "limit": "100"}, timeout=30)
         resp.raise_for_status()
         subs = resp.json().get("content") or []
